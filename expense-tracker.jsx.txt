@@ -1,0 +1,1195 @@
+import { useState, useEffect, useMemo, useRef } from "react";
+import {
+  Home as HomeIcon,
+  Coffee,
+  Utensils,
+  ShoppingCart,
+  HeartPulse,
+  ShoppingBag,
+  Car,
+  FileText,
+  MoreHorizontal,
+  Gift,
+  Film,
+  Wallet,
+  Plus,
+  X,
+  Trash2,
+  ChevronLeft,
+  ChevronRight,
+  ArrowLeftRight,
+  BarChart3,
+  Download,
+  ArrowDown,
+  ArrowUp,
+  Delete,
+  Award,
+  TrendingUp,
+  PlusCircle,
+  Check,
+} from "lucide-react";
+
+/* ---------- categories ---------- */
+const EXPENSE_CATEGORIES = [
+  { id: "rent", label: "إيجار", icon: HomeIcon, color: "#4C8DFF" },
+  { id: "cafe", label: "مقهى", icon: Coffee, color: "#B9793D" },
+  { id: "restaurants", label: "مطاعم", icon: Utensils, color: "#E5B842" },
+  { id: "grocery", label: "بقالة", icon: ShoppingCart, color: "#35C46B" },
+  { id: "health", label: "صحة", icon: HeartPulse, color: "#E1495B" },
+  { id: "shopping", label: "تسوق", icon: ShoppingBag, color: "#E0538B" },
+  { id: "transport", label: "مواصلات", icon: Car, color: "#06B6D4" },
+  { id: "bills", label: "فواتير", icon: FileText, color: "#A855F7" },
+  { id: "other_exp", label: "أخرى", icon: MoreHorizontal, color: "#64748B" },
+  { id: "gifts_out", label: "هدايا", icon: Gift, color: "#EF4444" },
+  { id: "fun", label: "ترفيه", icon: Film, color: "#E8A23D" },
+];
+
+const INCOME_CATEGORIES = [
+  { id: "salary", label: "راتب", icon: Wallet, color: "#10B981" },
+  { id: "reward", label: "مكافأة", icon: Award, color: "#E5B842" },
+  { id: "investment", label: "استثمار", icon: TrendingUp, color: "#06B6D4" },
+  { id: "gift_in", label: "هدية", icon: Gift, color: "#E0538B" },
+  { id: "other_inc", label: "أخرى", icon: PlusCircle, color: "#64748B" },
+];
+
+const CARRYOVER_CATEGORY = { id: "carryover", label: "مدور", icon: MoreHorizontal, color: "#64748B" };
+const ALL_CATEGORIES = [...EXPENSE_CATEGORIES, ...INCOME_CATEGORIES, CARRYOVER_CATEGORY];
+const catById = (id) => ALL_CATEGORIES.find((c) => c.id === id) || EXPENSE_CATEGORIES[8];
+
+const CURRENCY = "₺";
+
+function fmt(n) {
+  return new Intl.NumberFormat("tr-TR", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(Math.abs(n));
+}
+
+function todayISO() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function ymOf(dateStr) {
+  return dateStr.slice(0, 7);
+}
+
+function ymAdd(ym, delta) {
+  const [y, m] = ym.split("-").map(Number);
+  const d = new Date(y, m - 1 + delta, 1);
+  return d.toISOString().slice(0, 7);
+}
+
+function computeMonthRemaining(transactions, ym) {
+  const monthTx = transactions.filter((t) => ymOf(t.date) === ym);
+  const income = monthTx.filter((t) => t.type === "income").reduce((s, t) => s + t.amount, 0);
+  const expense = monthTx.filter((t) => t.type === "expense").reduce((s, t) => s + t.amount, 0);
+  return income - expense;
+}
+
+/* Carries the previous month's remaining balance forward as a new transaction
+   dated on the 1st of each subsequent month, so every month's totals start from
+   zero and only the leftover amount rolls in as a single labeled entry. */
+function applyMonthlyCarryover(transactions) {
+  if (transactions.length === 0) return transactions;
+  const currentYm = todayISO().slice(0, 7);
+  const months = [...new Set(transactions.map((t) => ymOf(t.date)))].sort();
+  let lastYm = months[months.length - 1];
+  if (lastYm >= currentYm) return transactions;
+
+  let updated = [...transactions];
+  let cursor = lastYm;
+  while (cursor < currentYm) {
+    const nextYm = ymAdd(cursor, 1);
+    const alreadyCarried = updated.some((t) => t.category === "carryover" && ymOf(t.date) === nextYm);
+    if (!alreadyCarried) {
+      const remaining = computeMonthRemaining(updated, cursor);
+      if (remaining !== 0) {
+        updated.push({
+          id: "carryover-" + nextYm,
+          type: remaining >= 0 ? "income" : "expense",
+          amount: Math.abs(remaining),
+          category: "carryover",
+          note: remaining >= 0 ? "مدور من الشهر الماضي" : "عجز من الشهر الماضي",
+          date: nextYm + "-01",
+        });
+      }
+    }
+    cursor = nextYm;
+  }
+  return updated;
+}
+
+function monthLabel(date) {
+  return new Intl.DateTimeFormat("ar", { month: "long", year: "numeric" }).format(date);
+}
+
+function dayLabel(dateStr) {
+  const d = new Date(dateStr + "T00:00:00");
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+  const sameDay = (a, b) =>
+    a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+  if (sameDay(d, today)) return "اليوم";
+  if (sameDay(d, yesterday)) return "أمس";
+  return new Intl.DateTimeFormat("ar", { day: "numeric", month: "long" }).format(d);
+}
+
+function fullDateLabel(dateStr) {
+  const d = new Date(dateStr + "T00:00:00");
+  return new Intl.DateTimeFormat("ar", { day: "numeric", month: "long", year: "numeric" }).format(d);
+}
+
+function monthRangeFromYm(ym) {
+  const [y, m] = ym.split("-").map(Number);
+  const start = ym + "-01";
+  const lastDay = new Date(y, m, 0).getDate();
+  const end = ym + "-" + String(lastDay).padStart(2, "0");
+  return { start, end };
+}
+
+/* ---------- storage hook ---------- */
+function useTransactions() {
+  const [items, setItems] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await window.storage.get("wallet-transactions");
+        if (res && res.value) setItems(JSON.parse(res.value));
+      } catch (e) {
+        /* nothing stored yet */
+      } finally {
+        setLoaded(true);
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    window.storage.set("wallet-transactions", JSON.stringify(items)).catch(() => {});
+  }, [items, loaded]);
+
+  return [items, setItems, loaded];
+}
+
+/* ---------- small UI pieces ---------- */
+function Ring({ percent, size = 220 }) {
+  const stroke = 16;
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+  const clamped = Math.max(0, Math.min(100, percent));
+  const dash = (clamped / 100) * c;
+  return (
+    <svg width={size} height={size} style={{ transform: "rotate(-90deg)" }}>
+      <circle cx={size / 2} cy={size / 2} r={r} stroke="#E5B842" strokeWidth={stroke} fill="none" opacity={0.9} />
+      <circle
+        cx={size / 2}
+        cy={size / 2}
+        r={r}
+        stroke="#10B981"
+        strokeWidth={stroke}
+        fill="none"
+        strokeDasharray={`${dash} ${c - dash}`}
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function Donut({ segments, size = 200, centerLabel, centerValue }) {
+  const stroke = 34;
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+  let offset = 0;
+  const total = segments.reduce((s, x) => s + x.value, 0) || 1;
+  return (
+    <svg width={size} height={size} style={{ transform: "rotate(-90deg)" }}>
+      <circle cx={size / 2} cy={size / 2} r={r} stroke="rgba(255,255,255,0.08)" strokeWidth={stroke} fill="none" />
+      {segments.map((seg, i) => {
+        const len = (seg.value / total) * c;
+        const el = (
+          <circle
+            key={i}
+            cx={size / 2}
+            cy={size / 2}
+            r={r}
+            stroke={seg.color}
+            strokeWidth={stroke}
+            fill="none"
+            strokeDasharray={`${len} ${c - len}`}
+            strokeDashoffset={-offset}
+          />
+        );
+        offset += len;
+        return el;
+      })}
+      <text
+        x="50%"
+        y="45%"
+        textAnchor="middle"
+        fill="#94A3B8"
+        fontSize="12"
+        fontFamily="Tajawal"
+        transform={`rotate(90 ${size / 2} ${size / 2})`}
+      >
+        {centerLabel}
+      </text>
+      <text
+        x="50%"
+        y="58%"
+        textAnchor="middle"
+        fill="#FFFFFF"
+        fontSize="22"
+        fontWeight="900"
+        fontFamily="Tajawal"
+        transform={`rotate(90 ${size / 2} ${size / 2})`}
+      >
+        {centerValue}
+      </text>
+    </svg>
+  );
+}
+
+function TxRow({ tx, onDelete }) {
+  const cat = catById(tx.category);
+  const Icon = cat.icon;
+  const isIncome = tx.type === "income";
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        padding: "14px 4px",
+        borderBottom: "1px solid #182032",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <button
+          onClick={() => onDelete(tx.id)}
+          aria-label="حذف"
+          style={{ background: "none", border: "none", color: "#64748B", cursor: "pointer", padding: 4 }}
+        >
+          <Trash2 size={16} />
+        </button>
+        <div
+          style={{
+            fontWeight: 900,
+            fontSize: 17,
+            color: isIncome ? "#10B981" : "#EF4444",
+            minWidth: 96,
+          }}
+        >
+          {isIncome ? "+" : "-"}
+          {fmt(tx.amount)}
+        </div>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, textAlign: "right" }}>
+        <div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: "#FFFFFF" }}>{tx.note || cat.label}</div>
+          <div style={{ fontSize: 12, color: "#64748B" }}>{cat.label}</div>
+        </div>
+        <div
+          style={{
+            width: 42,
+            height: 42,
+            borderRadius: 999,
+            background: cat.color + "26",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: cat.color,
+            flexShrink: 0,
+          }}
+        >
+          <Icon size={19} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Add Modal ---------- */
+function AddModal({ onClose, onSave }) {
+  const [type, setType] = useState("expense");
+  const [display, setDisplay] = useState("0");
+  const [category, setCategory] = useState(EXPENSE_CATEGORIES[2].id);
+  const [note, setNote] = useState("");
+
+  useEffect(() => {
+    setCategory(type === "expense" ? EXPENSE_CATEGORIES[2].id : INCOME_CATEGORIES[0].id);
+  }, [type]);
+
+  const cats = type === "expense" ? EXPENSE_CATEGORIES : INCOME_CATEGORIES;
+
+  function press(key) {
+    if (key === "back") {
+      setDisplay((d) => (d.length > 1 ? d.slice(0, -1) : "0"));
+      return;
+    }
+    if (key === ".") {
+      if (display.includes(".")) return;
+      setDisplay((d) => d + ".");
+      return;
+    }
+    setDisplay((d) => {
+      if (d === "0") return key;
+      if (d.includes(".") && d.split(".")[1].length >= 2) return d;
+      return d + key;
+    });
+  }
+
+  function save() {
+    const amount = parseFloat(display);
+    if (!amount || amount <= 0) return;
+    onSave({
+      id: Date.now().toString(),
+      type,
+      amount,
+      category,
+      note: note.trim(),
+      date: todayISO(),
+    });
+  }
+
+  const keys = [
+    ["1", "2", "3"],
+    ["4", "5", "6"],
+    ["7", "8", "9"],
+    [".", "0", "back"],
+  ];
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "#101728",
+        zIndex: 60,
+        display: "flex",
+        flexDirection: "column",
+        padding: "18px 18px 12px",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <button onClick={onClose} style={iconBtnStyle}>
+          <X size={22} color="#FFFFFF" />
+        </button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button
+            onClick={() => setType("income")}
+            style={{
+              ...pillStyle,
+              background: type === "income" ? "#10B981" : "#182032",
+              color: type === "income" ? "#101728" : "#94A3B8",
+            }}
+          >
+            دخل
+          </button>
+          <button
+            onClick={() => setType("expense")}
+            style={{
+              ...pillStyle,
+              background: type === "expense" ? "#EF4444" : "#182032",
+              color: type === "expense" ? "#101728" : "#94A3B8",
+            }}
+          >
+            مصروف
+          </button>
+        </div>
+      </div>
+
+      <div style={{ textAlign: "center", margin: "22px 0 10px" }}>
+        <div style={{ fontSize: 44, fontWeight: 900, color: "#FFFFFF" }}>
+          {display}
+          <span style={{ fontSize: 20, color: "#64748B" }}> {CURRENCY}</span>
+        </div>
+      </div>
+
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(4, 1fr)",
+          gap: 10,
+          marginBottom: 14,
+        }}
+      >
+        {cats.map((c) => {
+          const Icon = c.icon;
+          const active = category === c.id;
+          return (
+            <button
+              key={c.id}
+              onClick={() => setCategory(c.id)}
+              style={{
+                background: "none",
+                border: "none",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                gap: 6,
+                cursor: "pointer",
+                padding: 4,
+              }}
+            >
+              <div
+                style={{
+                  width: 52,
+                  height: 52,
+                  borderRadius: 16,
+                  background: c.color + (active ? "" : "26"),
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  color: active ? "#101728" : c.color,
+                  border: active ? `2px solid ${c.color}` : "2px solid transparent",
+                }}
+              >
+                <Icon size={22} />
+              </div>
+              <span style={{ fontSize: 11, color: "#94A3B8" }}>{c.label}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      <input
+        value={note}
+        onChange={(e) => setNote(e.target.value)}
+        placeholder="ملاحظة (اختياري)"
+        style={{
+          background: "#1E293B",
+          border: "1px solid rgba(255,255,255,0.08)",
+          borderRadius: 10,
+          padding: "12px 14px",
+          color: "#FFFFFF",
+          fontSize: 14,
+          marginBottom: 14,
+          fontFamily: "Tajawal",
+        }}
+      />
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, flex: 1 }}>
+        {keys.flat().map((k, i) => (
+          <button
+            key={i}
+            onClick={() => press(k)}
+            style={{
+              background: "#1E293B",
+              border: "none",
+              borderRadius: 14,
+              color: "#FFFFFF",
+              fontSize: 22,
+              fontWeight: 700,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: "pointer",
+            }}
+          >
+            {k === "back" ? <Delete size={20} /> : k}
+          </button>
+        ))}
+      </div>
+
+      <button
+        onClick={save}
+        style={{
+          marginTop: 14,
+          background: "#E5B842",
+          border: "none",
+          borderRadius: 14,
+          padding: "16px 0",
+          fontWeight: 900,
+          fontSize: 16,
+          color: "#101728",
+          cursor: "pointer",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 8,
+        }}
+      >
+        حفظ
+        <Check size={20} strokeWidth={3} />
+      </button>
+    </div>
+  );
+}
+
+const iconBtnStyle = {
+  background: "#1E293B",
+  border: "none",
+  borderRadius: 999,
+  width: 40,
+  height: 40,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  cursor: "pointer",
+};
+
+const pillStyle = {
+  border: "none",
+  borderRadius: 999,
+  padding: "8px 18px",
+  fontWeight: 700,
+  fontSize: 13,
+  cursor: "pointer",
+  fontFamily: "Tajawal",
+};
+
+/* ---------- Screens ---------- */
+function HomeScreen({ transactions }) {
+  const now = new Date();
+  const thisMonth = transactions.filter((t) => t.date.slice(0, 7) === now.toISOString().slice(0, 7));
+  const income = thisMonth.filter((t) => t.type === "income").reduce((s, t) => s + t.amount, 0);
+  const expense = thisMonth.filter((t) => t.type === "expense").reduce((s, t) => s + t.amount, 0);
+  const balance = income - expense;
+  const savingsPct = income > 0 ? Math.max(0, ((income - expense) / income) * 100) : 0;
+
+  const byCat = useMemo(() => {
+    const map = {};
+    thisMonth
+      .filter((t) => t.type === "expense")
+      .forEach((t) => (map[t.category] = (map[t.category] || 0) + t.amount));
+    return Object.entries(map)
+      .map(([id, value]) => ({ ...catById(id), value }))
+      .sort((a, b) => b.value - a.value);
+  }, [thisMonth]);
+
+  const recent = [...transactions].sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 4);
+
+  return (
+    <div style={{ padding: "24px 18px 100px" }}>
+      <div
+        style={{
+          fontFamily: "'Changa', 'Tajawal', sans-serif",
+          fontSize: 36,
+          fontWeight: 800,
+          color: "#E5B842",
+          textAlign: "right",
+          marginBottom: 18,
+        }}
+      >
+        مصاريفي
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "center", position: "relative", marginBottom: 20 }}>
+        <Ring percent={savingsPct} />
+        <div
+          style={{
+            position: "absolute",
+            top: "50%",
+            left: "50%",
+            transform: "translate(-50%,-50%)",
+            textAlign: "center",
+          }}
+        >
+          <div style={{ fontSize: 17, fontWeight: 700, fontFamily: "'Tajawal', sans-serif", color: "#94A3B8" }}>الرصيد الشهري</div>
+          <div style={{ fontSize: 38, fontWeight: 900, color: "#FFFFFF" }}>{fmt(balance)}</div>
+          <div style={{ fontSize: 22, fontWeight: 900, color: "#E5B842" }}>{CURRENCY}</div>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
+        <div style={{ ...cardStyle, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: "#94A3B8" }}>الدخل</div>
+            <div style={{ fontSize: 22, fontWeight: 900, color: "#10B981", marginTop: 6 }}>{fmt(income)}</div>
+          </div>
+          <div style={{ width: 64, height: 64, borderRadius: "50%", background: "rgba(76,193,138,0.18)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <ArrowUp size={28} color="#10B981" strokeWidth={2.5} />
+          </div>
+        </div>
+        <div style={{ ...cardStyle, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: "#94A3B8" }}>المصاريف</div>
+            <div style={{ fontSize: 22, fontWeight: 900, color: "#EF4444", marginTop: 6 }}>{fmt(expense)}</div>
+          </div>
+          <div style={{ width: 64, height: 64, borderRadius: "50%", background: "rgba(233,98,138,0.18)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <ArrowDown size={28} color="#EF4444" strokeWidth={2.5} />
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+        <div style={{ ...cardStyle, minHeight: 200 }}>
+          <div style={{ fontSize: 13, color: "#94A3B8", marginBottom: 10, textAlign: "right" }}>آخر الحركات</div>
+          {recent.length === 0 && (
+            <div style={{ textAlign: "center", color: "#64748B", fontSize: 12, padding: "20px 0" }}>
+              ما في حركات بعد
+            </div>
+          )}
+          {recent.map((t) => (
+            <MiniTxRow key={t.id} tx={t} />
+          ))}
+        </div>
+
+        {byCat.length > 0 && (
+          <div style={cardStyle}>
+            <div style={{ fontSize: 13, color: "#94A3B8", marginBottom: 10, textAlign: "right" }}>حسب الفئة</div>
+            <div style={{ display: "flex", justifyContent: "center", marginBottom: 10 }}>
+              <Donut segments={byCat} size={150} centerLabel="الإجمالي" centerValue={fmt(expense)} />
+            </div>
+            {byCat.slice(0, 4).map((c) => (
+              <div key={c.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, padding: "3px 0" }}>
+                <span style={{ color: "#FFFFFF" }}>{fmt(c.value)}</span>
+                <span style={{ display: "flex", alignItems: "center", gap: 6, color: "#94A3B8" }}>
+                  {c.label}
+                  <span style={{ width: 9, height: 9, borderRadius: 999, background: c.color, display: "inline-block" }} />
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MiniTxRow({ tx }) {
+  const cat = catById(tx.category);
+  const Icon = cat.icon;
+  const isIncome = tx.type === "income";
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid #22304C" }}>
+      <div style={{ fontWeight: 900, fontSize: 13, color: isIncome ? "#10B981" : "#EF4444" }}>
+        {isIncome ? "+" : "-"}
+        {fmt(tx.amount)}
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, textAlign: "right", minWidth: 0 }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "#FFFFFF", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 70 }}>
+            {tx.note || cat.label}
+          </div>
+          <div style={{ fontSize: 10, color: "#64748B" }}>{cat.label}</div>
+        </div>
+        <div
+          style={{
+            width: 30,
+            height: 30,
+            borderRadius: 999,
+            background: cat.color + "26",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: cat.color,
+            flexShrink: 0,
+          }}
+        >
+          <Icon size={14} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const cardStyle = {
+  background: "#1E293B",
+  borderRadius: 28,
+  padding: 16,
+  border: "1px solid rgba(255,255,255,0.08)",
+  flex: 1,
+};
+
+function TransactionsScreen({ transactions, onDelete }) {
+  const [filter, setFilter] = useState("all");
+  const filtered = transactions.filter((t) => filter === "all" || t.type === (filter === "income" ? "income" : "expense"));
+  const total = filtered.reduce((s, t) => s + (t.type === "income" ? t.amount : -t.amount), 0);
+
+  const groups = useMemo(() => {
+    const map = {};
+    [...filtered]
+      .sort((a, b) => (a.date < b.date ? 1 : -1))
+      .forEach((t) => {
+        if (!map[t.date]) map[t.date] = [];
+        map[t.date].push(t);
+      });
+    return Object.entries(map);
+  }, [filtered]);
+
+  return (
+    <div style={{ padding: "24px 18px 100px" }}>
+      <div style={{ fontSize: 26, fontWeight: 900, color: "#FFFFFF", textAlign: "center", marginBottom: 16 }}>
+        الحركات
+      </div>
+      <div style={{ display: "flex", gap: 8, justifyContent: "center", marginBottom: 16 }}>
+        {[
+          { id: "all", label: "الكل" },
+          { id: "expense", label: "مصاريف" },
+          { id: "income", label: "دخل" },
+        ].map((f) => (
+          <button
+            key={f.id}
+            onClick={() => setFilter(f.id)}
+            style={{
+              ...pillStyle,
+              background: filter === f.id ? "#E5B842" : "#1E293B",
+              color: filter === f.id ? "#101728" : "#94A3B8",
+            }}
+          >
+            {f.label}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ color: total >= 0 ? "#10B981" : "#EF4444", fontWeight: 900, fontSize: 16, marginBottom: 8 }}>
+        {total >= 0 ? "+" : "-"}
+        {fmt(total)} {CURRENCY}
+      </div>
+
+      {groups.length === 0 && (
+        <div style={{ textAlign: "center", color: "#64748B", fontSize: 13, padding: "40px 0" }}>
+          ما في حركات مسجّلة
+        </div>
+      )}
+
+      {groups.map(([date, txs]) => (
+        <div key={date} style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 13, color: "#94A3B8", marginBottom: 4 }}>{dayLabel(date)}</div>
+          <div style={{ ...cardStyle, padding: "4px 14px" }}>
+            {txs.map((t) => (
+              <TxRow key={t.id} tx={t} onDelete={onDelete} />
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function PrintReport({ transactions, range, onFinished }) {
+  useEffect(() => {
+    if (!range) return;
+    const t = setTimeout(() => window.print(), 250);
+    const handler = () => onFinished();
+    window.addEventListener("afterprint", handler);
+    return () => {
+      clearTimeout(t);
+      window.removeEventListener("afterprint", handler);
+    };
+  }, [range]);
+
+  if (!range) return null;
+
+  const rangeTx = transactions
+    .filter((t) => t.date >= range.start && t.date <= range.end)
+    .sort((a, b) => (a.date < b.date ? -1 : 1));
+
+  const income = rangeTx.filter((t) => t.type === "income").reduce((s, t) => s + t.amount, 0);
+  const expense = rangeTx.filter((t) => t.type === "expense").reduce((s, t) => s + t.amount, 0);
+
+  const byCat = {};
+  rangeTx.filter((t) => t.type === "expense").forEach((t) => (byCat[t.category] = (byCat[t.category] || 0) + t.amount));
+  const catRows = Object.entries(byCat).map(([id, value]) => ({ ...catById(id), value })).sort((a, b) => b.value - a.value);
+
+  return (
+    <div id="print-report-root">
+      <div className="pr-page">
+        <div className="pr-header">
+          <div>
+            <div className="pr-title">تقرير المصروفات</div>
+            <div className="pr-sub">مصاريفي</div>
+          </div>
+          <div className="pr-period">
+            <div style={{ fontWeight: 700, marginBottom: 4 }}>فترة التقرير</div>
+            <div className="pr-period-row"><span>تاريخ البداية</span><b>{fullDateLabel(range.start)}</b></div>
+            <div className="pr-period-row"><span>تاريخ النهاية</span><b>{fullDateLabel(range.end)}</b></div>
+          </div>
+        </div>
+
+        <table className="pr-table">
+          <thead>
+            <tr>
+              <th>التاريخ</th>
+              <th>الوصف</th>
+              <th>التصنيف</th>
+              <th>المبلغ</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rangeTx.length === 0 && (
+              <tr><td colSpan="4" style={{ textAlign: "center", padding: 16, color: "#94A3B8" }}>ما في حركات بهاي الفترة</td></tr>
+            )}
+            {rangeTx.map((t) => (
+              <tr key={t.id}>
+                <td>{fullDateLabel(t.date)}</td>
+                <td>{t.note || catById(t.category).label}</td>
+                <td>{catById(t.category).label}</td>
+                <td className={t.type === "income" ? "pr-green" : "pr-red"}>
+                  {t.type === "income" ? "+" : "-"}{fmt(t.amount)} {CURRENCY}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+
+        <div className="pr-bar">إجمالي الفئات</div>
+        <table className="pr-table">
+          <tbody>
+            {catRows.length === 0 && (
+              <tr><td colSpan="2" style={{ textAlign: "center", padding: 12, color: "#94A3B8" }}>لا يوجد مصاريف</td></tr>
+            )}
+            {catRows.map((c) => (
+              <tr key={c.id}>
+                <td>{c.label}</td>
+                <td className="pr-red">{fmt(c.value)} {CURRENCY}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+
+        <div className="pr-totals">
+          <div className="pr-total-row"><span>إجمالي الدخل</span><b className="pr-green">{fmt(income)} {CURRENCY}</b></div>
+          <div className="pr-total-row"><span>إجمالي المصاريف</span><b className="pr-red">{fmt(expense)} {CURRENCY}</b></div>
+          <div className="pr-total-row pr-grand"><span>الصافي</span><b>{fmt(income - expense)} {CURRENCY}</b></div>
+        </div>
+
+        <div className="pr-footer">تم إنشاء هذا التقرير من تطبيق مصاريفي</div>
+      </div>
+    </div>
+  );
+}
+
+function ReportsScreen({ transactions }) {
+  const [monthOffset, setMonthOffset] = useState(0);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportMode, setExportMode] = useState("lastMonth");
+  const [customStart, setCustomStart] = useState("");
+  const [customEnd, setCustomEnd] = useState("");
+  const [printRange, setPrintRange] = useState(null);
+
+  function handleExport() {
+    let range;
+    if (exportMode === "custom") {
+      if (!customStart || !customEnd) return;
+      range = { start: customStart, end: customEnd };
+    } else {
+      const now = new Date();
+      now.setDate(1);
+      now.setMonth(now.getMonth() - 1);
+      range = monthRangeFromYm(now.toISOString().slice(0, 7));
+    }
+    setPrintRange(range);
+    setExportOpen(false);
+  }
+
+  const base = new Date();
+  base.setDate(1);
+  base.setMonth(base.getMonth() + monthOffset);
+  const key = base.toISOString().slice(0, 7);
+
+  const monthTx = transactions.filter((t) => t.date.slice(0, 7) === key);
+  const income = monthTx.filter((t) => t.type === "income").reduce((s, t) => s + t.amount, 0);
+  const expense = monthTx.filter((t) => t.type === "expense").reduce((s, t) => s + t.amount, 0);
+  const remaining = income - expense;
+  const savingsPct = income > 0 ? Math.max(0, Math.min(100, (remaining / income) * 100)) : 0;
+
+  const byCat = useMemo(() => {
+    const map = {};
+    monthTx
+      .filter((t) => t.type === "expense")
+      .forEach((t) => (map[t.category] = (map[t.category] || 0) + t.amount));
+    return Object.entries(map)
+      .map(([id, value]) => ({ ...catById(id), value }))
+      .sort((a, b) => b.value - a.value);
+  }, [monthTx]);
+
+  return (
+    <>
+    <div style={{ padding: "24px 18px 100px" }}>
+      <div style={{ fontSize: 26, fontWeight: 900, color: "#FFFFFF", textAlign: "center", marginBottom: 16 }}>
+        التقارير
+      </div>
+
+      <button
+        onClick={() => setExportOpen((o) => !o)}
+        style={{ ...pillStyle, display: "flex", alignItems: "center", gap: 8, background: "#1E293B", color: "#E5B842", margin: "0 auto 14px", padding: "10px 18px" }}
+      >
+        <Download size={16} />
+        تحميل تقرير PDF
+      </button>
+
+      {exportOpen && (
+        <div style={{ ...cardStyle, marginBottom: 16 }}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            <button
+              onClick={() => setExportMode("lastMonth")}
+              style={{ ...pillStyle, flex: 1, background: exportMode === "lastMonth" ? "#E5B842" : "#182032", color: exportMode === "lastMonth" ? "#101728" : "#94A3B8" }}
+            >
+              الشهر الماضي
+            </button>
+            <button
+              onClick={() => setExportMode("custom")}
+              style={{ ...pillStyle, flex: 1, background: exportMode === "custom" ? "#E5B842" : "#182032", color: exportMode === "custom" ? "#101728" : "#94A3B8" }}
+            >
+              فترة مخصصة
+            </button>
+          </div>
+
+          {exportMode === "custom" && (
+            <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+              <input
+                type="date"
+                value={customStart}
+                onChange={(e) => setCustomStart(e.target.value)}
+                style={{ flex: 1, background: "#101728", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 8, padding: 10, color: "#FFFFFF", fontFamily: "Tajawal" }}
+              />
+              <input
+                type="date"
+                value={customEnd}
+                onChange={(e) => setCustomEnd(e.target.value)}
+                style={{ flex: 1, background: "#101728", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 8, padding: 10, color: "#FFFFFF", fontFamily: "Tajawal" }}
+              />
+            </div>
+          )}
+
+          <button
+            onClick={handleExport}
+            style={{ width: "100%", background: "#E5B842", border: "none", borderRadius: 10, padding: "12px 0", fontWeight: 900, color: "#101728", cursor: "pointer" }}
+          >
+            تصدير PDF
+          </button>
+        </div>
+      )}
+
+      <div style={{ ...cardStyle, display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+        <button onClick={() => setMonthOffset((m) => m - 1)} style={iconBtnStyle}>
+          <ChevronRight size={18} color="#FFFFFF" />
+        </button>
+        <div style={{ fontWeight: 900, fontSize: 17, color: "#FFFFFF" }}>{monthLabel(base)}</div>
+        <button
+          onClick={() => setMonthOffset((m) => Math.min(0, m + 1))}
+          style={iconBtnStyle}
+          disabled={monthOffset === 0}
+        >
+          <ChevronLeft size={18} color={monthOffset === 0 ? "#3A4A70" : "#FFFFFF"} />
+        </button>
+      </div>
+
+      <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
+        <div style={{ ...cardStyle, textAlign: "center" }}>
+          <Wallet size={18} color="#94A3B8" style={{ marginBottom: 6 }} />
+          <div style={{ fontSize: 12, color: "#94A3B8" }}>المتبقي</div>
+          <div style={{ fontSize: 16, fontWeight: 900, color: "#FFFFFF" }}>{fmt(remaining)}</div>
+        </div>
+        <div style={{ ...cardStyle, textAlign: "center" }}>
+          <ArrowDown size={18} color="#EF4444" style={{ marginBottom: 6 }} />
+          <div style={{ fontSize: 12, color: "#94A3B8" }}>المصاريف</div>
+          <div style={{ fontSize: 16, fontWeight: 900, color: "#FFFFFF" }}>{fmt(expense)}</div>
+        </div>
+        <div style={{ ...cardStyle, textAlign: "center" }}>
+          <ArrowUp size={18} color="#10B981" style={{ marginBottom: 6 }} />
+          <div style={{ fontSize: 12, color: "#94A3B8" }}>الدخل</div>
+          <div style={{ fontSize: 16, fontWeight: 900, color: "#FFFFFF" }}>{fmt(income)}</div>
+        </div>
+      </div>
+
+      <div style={{ ...cardStyle, marginBottom: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+          <span style={{ fontWeight: 900, color: "#10B981" }}>{savingsPct.toFixed(0)}%</span>
+          <span style={{ fontSize: 13, color: "#94A3B8" }}>نسبة الادخار</span>
+        </div>
+        <div style={{ height: 8, borderRadius: 999, background: "rgba(255,255,255,0.08)" }}>
+          <div style={{ height: 8, borderRadius: 999, width: `${savingsPct}%`, background: "#10B981" }} />
+        </div>
+      </div>
+
+      <div style={{ fontSize: 15, fontWeight: 900, color: "#FFFFFF", marginBottom: 10 }}>توزيع المصاريف</div>
+      <div style={cardStyle}>
+        {byCat.length === 0 ? (
+          <div style={{ textAlign: "center", color: "#64748B", fontSize: 13, padding: "20px 0" }}>
+            ما في مصاريف هالشهر
+          </div>
+        ) : (
+          <>
+            <div style={{ display: "flex", justifyContent: "center", marginBottom: 14 }}>
+              <Donut segments={byCat} centerLabel="الإجمالي" centerValue={fmt(expense)} />
+            </div>
+            {byCat.map((c) => {
+              const pct = expense > 0 ? (c.value / expense) * 100 : 0;
+              return (
+                <div key={c.id} style={{ marginBottom: 10 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
+                    <span style={{ display: "flex", alignItems: "center", gap: 8, color: "#FFFFFF" }}>
+                      <span style={{ width: 10, height: 10, borderRadius: 999, background: c.color, display: "inline-block" }} />
+                      {c.label}
+                    </span>
+                    <span style={{ color: "#94A3B8" }}>
+                      {fmt(c.value)} · {pct.toFixed(0)}%
+                    </span>
+                  </div>
+                  <div style={{ height: 6, borderRadius: 999, background: "rgba(255,255,255,0.08)" }}>
+                    <div style={{ height: 6, borderRadius: 999, width: `${pct}%`, background: c.color }} />
+                  </div>
+                </div>
+              );
+            })}
+          </>
+        )}
+      </div>
+    </div>
+
+    <PrintReport transactions={transactions} range={printRange} onFinished={() => setPrintRange(null)} />
+    </>
+  );
+}
+
+/* ---------- Nav ---------- */
+function BottomNav({ view, setView, onAdd }) {
+  const items = [
+    { id: "home", label: "الرئيسية", icon: HomeIcon },
+    { id: "transactions", label: "الحركات", icon: ArrowLeftRight },
+    { id: "reports", label: "التقارير", icon: BarChart3 },
+  ];
+  return (
+    <div
+      style={{
+        position: "fixed",
+        bottom: 0,
+        left: 0,
+        right: 0,
+        background: "#121B30",
+        borderTop: "1px solid #182032",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-around",
+        padding: "10px 0 18px",
+        zIndex: 40,
+      }}
+    >
+      {items.slice(0, 1).map((it) => (
+        <NavBtn key={it.id} it={it} active={view === it.id} onClick={() => setView(it.id)} />
+      ))}
+      {items.slice(1, 2).map((it) => (
+        <NavBtn key={it.id} it={it} active={view === it.id} onClick={() => setView(it.id)} />
+      ))}
+      <button
+        onClick={onAdd}
+        style={{
+          background: "#E5B842",
+          border: "none",
+          borderRadius: 999,
+          width: 84,
+          height: 84,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          marginTop: -42,
+          boxShadow: "0 8px 20px rgba(0,0,0,0.35)",
+          cursor: "pointer",
+        }}
+      >
+        <Plus size={38} color="#101728" strokeWidth={2.6} />
+      </button>
+      {items.slice(2, 3).map((it) => (
+        <NavBtn key={it.id} it={it} active={view === it.id} onClick={() => setView(it.id)} />
+      ))}
+    </div>
+  );
+}
+
+function NavBtn({ it, active, onClick }) {
+  const Icon = it.icon;
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        background: "none",
+        border: "none",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        gap: 4,
+        cursor: "pointer",
+        color: active ? "#E5B842" : "#8F9AAF",
+      }}
+    >
+      <Icon size={26} strokeWidth={2.5} />
+      <span style={{ fontSize: 13, fontWeight: 500 }}>{it.label}</span>
+    </button>
+  );
+}
+
+/* ---------- App ---------- */
+export default function ExpenseApp() {
+  const [transactions, setTransactions, loaded] = useTransactions();
+  const [view, setView] = useState("home");
+  const [modalOpen, setModalOpen] = useState(false);
+
+  useEffect(() => {
+    if (!loaded) return;
+    setTransactions((prev) => applyMonthlyCarryover(prev));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded]);
+
+  function addTx(tx) {
+    setTransactions((prev) => [tx, ...prev]);
+    setModalOpen(false);
+  }
+
+  function deleteTx(id) {
+    setTransactions((prev) => prev.filter((t) => t.id !== id));
+  }
+
+  return (
+    <div
+      dir="rtl"
+      lang="ar"
+      style={{
+        minHeight: "100vh",
+        background: "#101728",
+        fontFamily: "'Tajawal', sans-serif",
+        color: "#FFFFFF",
+      }}
+    >
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;900&family=Changa:wght@600;700;800&display=swap');
+        * { box-sizing: border-box; }
+        button:disabled { cursor: not-allowed; }
+
+        #print-report-root { display: none; }
+        @media print {
+          body * { visibility: hidden; }
+          #print-report-root, #print-report-root * { visibility: visible; }
+          #print-report-root { display: block !important; position: fixed; top: 0; left: 0; width: 100%; background: #fff; }
+          @page { margin: 14mm; }
+        }
+        .pr-page { background: #fff; color: #1B2A4A; padding: 10px; font-family: 'Tajawal', sans-serif; direction: rtl; }
+        .pr-header { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 3px solid #1E56A0; padding-bottom: 14px; margin-bottom: 18px; }
+        .pr-title { font-size: 24px; font-weight: 900; color: #1E56A0; }
+        .pr-sub { font-size: 13px; color: #5C7A9A; margin-top: 4px; }
+        .pr-period { text-align: left; font-size: 12px; color: #33455F; }
+        .pr-period-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
+        .pr-table { width: 100%; border-collapse: collapse; margin-bottom: 18px; font-size: 13px; }
+        .pr-table th { background: #1E56A0; color: #fff; padding: 8px 10px; text-align: right; font-weight: 700; }
+        .pr-table td { padding: 7px 10px; border-bottom: 1px solid #D7E3F2; }
+        .pr-table tr:nth-child(even) td { background: #EAF2FB; }
+        .pr-green { color: #1E8E4F; font-weight: 700; }
+        .pr-red { color: #C0392B; font-weight: 700; }
+        .pr-bar { background: #1E56A0; color: #fff; padding: 8px 14px; font-weight: 700; font-size: 13px; border-radius: 6px 6px 0 0; margin-top: 6px; }
+        .pr-totals { margin-top: 10px; border-top: 2px solid #1E56A0; padding-top: 10px; }
+        .pr-total-row { display: flex; justify-content: space-between; padding: 6px 4px; font-size: 14px; }
+        .pr-grand { font-size: 17px; font-weight: 900; border-top: 1px solid #D7E3F2; margin-top: 6px; padding-top: 10px; }
+        .pr-footer { margin-top: 24px; font-size: 11px; color: #94A3B8; text-align: center; }
+      `}</style>
+
+      {!loaded ? (
+        <div style={{ padding: 40, textAlign: "center", color: "#64748B" }}>...جارِ التحميل</div>
+      ) : (
+        <>
+          {view === "home" && <HomeScreen transactions={transactions} />}
+          {view === "transactions" && <TransactionsScreen transactions={transactions} onDelete={deleteTx} />}
+          {view === "reports" && <ReportsScreen transactions={transactions} />}
+        </>
+      )}
+
+      <BottomNav view={view} setView={setView} onAdd={() => setModalOpen(true)} />
+
+      {modalOpen && <AddModal onClose={() => setModalOpen(false)} onSave={addTx} />}
+    </div>
+  );
+}
